@@ -3,7 +3,6 @@ struct Particle {
     float2 position;
     float2 velocity;
     float2 force;
-    uint2 cell;
     uint id;
 };
 
@@ -27,37 +26,30 @@ cbuffer Boundaries : register(b1) {
 RWStructuredBuffer<Particle> Particles : register(u0);
 RWStructuredBuffer<float2> Positions : register(u1);
 
-StructuredBuffer<TimeData> SimulationTime : register(t0);
+RWStructuredBuffer<TimeData> SimulationTime : register(u2);
 
-float map(float input, float inputStart, float inputEnd, float outputStart, float outputEnd) {
-    float slope = 1.0 * (outputEnd - outputStart) / (inputEnd - inputStart);
-    return outputStart + slope * (input - inputStart);
+void ComputeX(uint i) {
+    double a = SimulationTime[0].dt * .5 / Particles[i].mass;
+    Particles[i].position += SimulationTime[0].dt * (Particles[i].velocity + a * Particles[i].force);
 }
 
-float2 map(float2 input, float2 inputStart, float2 inputEnd, float2 outputStart, float2 outputEnd) {
-    return float2(
-        map(input.x, inputStart.x, inputEnd.x, outputStart.x, outputEnd.x), 
-        map(input.y, inputStart.y, inputEnd.y, outputStart.y, outputEnd.y));
-}
-
-void AssignCell(uint i) {
-    float2 normalizedPos = map(Particles[i].position, bounds.xz, bounds.yw, 0.xx, float2(gridSize.xy));
-    Particles[i].cell = (uint2)clamp(floor(normalizedPos), 0.xx, float2(gridSize.xy - 1));
+void ComputeV(uint i) {
+    double a = SimulationTime[0].dt * .5 / Particles[i].mass;
+    Particles[i].velocity += a * Particles[i].force;
 }
 
 [numthreads(256, 1, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     uint Index = dispatchThreadID.x;
 
+    if (Index == 0) {
+        SimulationTime[0].totalTime += SimulationTime[0].dt;
+    }
+
     if (Index >= (uint)n) return;
 
-    float2 a = Particles[Index].force / Particles[Index].mass;
-    float dt = SimulationTime[0].dt;
+    ComputeX(Index);
+    ComputeV(Index);
 
-    Particles[Index].position += dt * Particles[Index].velocity + 0.5 * dt * dt * a;
-    Particles[Index].velocity += .5 * SimulationTime[0].dt * a;
-
-    Positions[Index] = (float2)Particles[Index].position;
-
-    AssignCell(Index);
+    Positions[Index] = Particles[Index].position;
 }

@@ -42,7 +42,7 @@ class RenderEngine:
 
         self.InitializeBounds()
 
-        self.renderPositions = np.empty((self.particles.size, 3), dtype=np.float32)
+        self.renderPositions = np.zeros((self.particles.size, 3), dtype=np.float32)
         self.colors = np.ones(shape=(self.particles.size, 4), dtype=np.float32)
 
         for i, color in COLORS:
@@ -73,7 +73,16 @@ class RenderEngine:
         self.renderPositions[:, :2] = positions
         self.scatter.data = self.renderPositions
 
-        # self.scatter.colors = self.colors
+        if 'cells' in self.computeEngine.__dict__:
+            cellsX = self.computeEngine.cells % self.computeEngine.gridSize[0]
+            cellsY = self.computeEngine.cells // self.computeEngine.gridSize[0]
+
+            self.colors[:, 0] = cellsX / self.computeEngine.gridSize[0]
+            self.colors[:, 1] = cellsY / self.computeEngine.gridSize[1]
+            self.colors[:, 2] = 0.5
+
+            self.scatter.colors = self.colors
+
         subplot.title = f'Simulation | {time.time() - self.time:.2f} s{f' | {self.computeEngine.time:.2f} s' if self.computeEngine.time > 0 else ''}'
 
         if self.print:

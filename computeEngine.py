@@ -1,8 +1,9 @@
 import struct
-import time
 from typing import Tuple
 
 import numpy as np
+import numba as nb
+from numba.extending import overload
 
 from Types import Particles
 
@@ -52,17 +53,14 @@ class ComputeEngine:
         
         self.UpdateParticles()
         
-        self.InitializeTimeShader()
-        self.InitializeClearShader()
         self.InitializeShader()
-        self.InitializeBinningShader()
         
     def InitializeConstantBuffers(self):
         # Config
         self.configBuffer = Buffer(Align256(7 * 4))
         self.configUpload = Buffer(self.configBuffer.size, HEAP_UPLOAD)
 
-        self.configUpload.upload(struct.pack('ifff2i2f', self.particles.size, self.particles.sigma, self.epsilon, self.rCut, *self.gridSize, *self.g))
+        self.configUpload.upload(struct.pack('Ifff2I2f', self.particles.size, self.particles.sigma, self.epsilon, self.rCut, *self.gridSize, *self.g))
         self.configUpload.copy_to(self.configBuffer)
 
         # Bounds
@@ -80,41 +78,19 @@ class ComputeEngine:
         self.timeUpload.upload(struct.pack('ff', self.time, self.dt))
         self.timeUpload.copy_to(self.timeBuffer)
 
-        # Cells Quantity
-        self.CellsQuantityBuffer = Buffer(4, format=compushady.formats.R32_UINT)
-        self.CellsQuantityUpload = Buffer(self.CellsQuantityBuffer.size, HEAP_UPLOAD)
-
-        self.CellsQuantityUpload.upload(struct.pack('I', self.gridSize[0] * self.gridSize[1]))
-        self.CellsQuantityUpload.copy_to(self.CellsQuantityBuffer)
-
-        # # Single Zero Buffer
-        # self.singleZeroBuffer = Buffer(4)
-        # self.singleZeroUpload = Buffer(self.singleZeroBuffer.size, HEAP_UPLOAD)
-
-        # self.singleZeroUpload.upload(struct.pack('I', 0))
-        # self.singleZeroUpload.copy_to(self.singleZeroBuffer)
-
-        # # Zero Buffer
-        # self.zeroBuffer = Buffer(4 * (self.gridSize[0] * self.gridSize[1] + 1))
-        # self.zeroUpload = Buffer(self.zeroBuffer.size, HEAP_UPLOAD)
-
-        # self.zeroUpload.upload(struct.pack('I', 0) * (self.gridSize[0] * self.gridSize[1] + 1))
-        # self.zeroUpload.copy_to(self.zeroBuffer)
-
     def InitializeIOBuffers(self):
         self.ParticlesBuffer = Buffer(self.particles.bufferSize * self.particles.size, stride=self.particles.bufferSize)
         self.ParticlesUpload = Buffer(self.ParticlesBuffer.size, HEAP_UPLOAD)
         self.ParticlesReadBack = Buffer(self.ParticlesBuffer.size, HEAP_READBACK)
 
-        self.PositionBuffer = Buffer(4 * 2 * self.particles.size, format=compushady.formats.R32G32_FLOAT)
+        self.PositionBuffer = Buffer(8 * self.particles.size, format=compushady.formats.R32G32_FLOAT)
         self.PositionReadBack = Buffer(self.PositionBuffer.size, HEAP_READBACK)
 
         self.CellOffsetsBuffer = Buffer(4 * (self.gridSize[0] * self.gridSize[1] + 1), format=compushady.formats.R32_UINT)
-        self.WorkingCellOffsetsBuffer = Buffer(self.CellOffsetsBuffer.size, format=compushady.formats.R32_UINT)
-        self.SortedParticleIndicesBuffer = Buffer(4 * self.particles.size, format=compushady.formats.R32_UINT)
+        self.CellOffsetsUpload = Buffer(self.CellOffsetsBuffer.size, HEAP_UPLOAD)
 
-        self.GlobalBlockTrackerBuffer = Buffer(4, format=compushady.formats.R32_UINT)
-        self.GlobalBlockTrackerUpload = Buffer(self.GlobalBlockTrackerBuffer.size, HEAP_UPLOAD)
+        self.SortedParticleIndicesBuffer = Buffer(4 * self.particles.size, format=compushady.formats.R32_UINT)
+        self.SortedParticleIndicesUpload = Buffer(self.SortedParticleIndicesBuffer.size, HEAP_UPLOAD)
     
     def InitializeShader(self):
 
@@ -124,8 +100,7 @@ class ComputeEngine:
         self.computePositions = Compute(
             shader=computePositions,
             cbv=[self.configBuffer, self.boundsBuffer],
-            srv=[self.timeBuffer],
-            uav=[self.ParticlesBuffer, self.PositionBuffer]
+            uav=[self.ParticlesBuffer, self.PositionBuffer, self.timeBuffer]
         )
 
         with open(COMPUTE_FORCES_SHADER_PATH) as file:
@@ -138,94 +113,104 @@ class ComputeEngine:
             uav=[self.ParticlesBuffer]
         )
 
-    def InitializeTimeShader(self):
-        with open(TIME_SHADER_PATH) as file:
-            shader = hlsl.compile(file.read())
-
-        self.updateTime = Compute(
-            shader=shader,
-            uav=[self.timeBuffer]
-        )
-
-    def InitializeClearShader(self):
-        with open(CLEAR_SHADER_PATH) as file:
-            shader = hlsl.compile(file.read())
-
-        self.clearCellOffsets = Compute(
-            shader=shader,
-            cbv=[self.configBuffer],
-            uav=[self.CellOffsetsBuffer, self.GlobalBlockTrackerBuffer]
-        )
-
-    def InitializeBinningShader(self):
-        with open(COUNT_PARTICLES_SHADER_PATH) as file:
-            shader = hlsl.compile(file.read())
-
-        self.countParticles = Compute(
-            shader=shader,
-            cbv=[self.configBuffer],
-            srv=[self.ParticlesBuffer],
-            uav=[self.CellOffsetsBuffer]
-        )
-
-        with open(PREFIX_SUM_SHADER_PATH) as file:
-            shader = hlsl.compile(file.read())
-
-        self.prefixSum = Compute(
-            shader=shader,
-            cbv=[self.CellsQuantityBuffer],
-            uav=[self.CellOffsetsBuffer, self.GlobalBlockTrackerBuffer]
-        )
-
-        with open(SORT_PARTICLE_INDICES_SHADER_PATH) as file:
-            shader = hlsl.compile(file.read())
-
-        self.sortParticleIndices = Compute(
-            shader=shader,
-            cbv=[self.configBuffer],
-            srv=[self.ParticlesBuffer],
-            uav=[self.WorkingCellOffsetsBuffer, self.SortedParticleIndicesBuffer]
-        )
-
     def UpdateParticles(self) -> None:
         buffer = self.particles.Get().tobytes()
         self.ParticlesUpload.upload(buffer)
         self.ParticlesUpload.copy_to(self.ParticlesBuffer)
 
+    def CalculateCells(self) -> None:
+        offsets, sortedIndices, cellIndices = ComputeCellsCountingSort(self.particles.GetPositions(), self.gridSize, self.particles.bounds)
+
+        self.cells = cellIndices
+
+        buffer = offsets.astype(np.uint32).tobytes()
+        self.CellOffsetsUpload.upload(buffer)
+        self.CellOffsetsUpload.copy_to(self.CellOffsetsBuffer)
+
+        buffer = sortedIndices.astype(np.uint32).tobytes()
+        self.SortedParticleIndicesUpload.upload(buffer)
+        self.SortedParticleIndicesUpload.copy_to(self.SortedParticleIndicesBuffer)
+
     def Dispatch(self) -> None:
-        self.updateTime.dispatch(1, 1, 1)
         self.frame += 1
 
         # t = time.perf_counter()
 
+        # compute cells and upload cell offsets
+        self.CalculateCells()
+
         x = int(np.ceil(self.particles.size / THREAD_NUM))
 
+        # dispatch compute shader
+        self.computeForces.dispatch(x, 1, 1)
         self.computePositions.dispatch(x, 1, 1)
 
-        if (self.frame % 50) == 0:
-            self.clearCellOffsets.dispatch(int(np.ceil(self.gridSize[0] * self.gridSize[1] / THREAD_NUM)), 1, 1)
-
-            self.countParticles.dispatch(x, 1, 1)
-            self.prefixSum.dispatch(8, 1, 1)
-
-            self.CellOffsetsBuffer.copy_to(self.WorkingCellOffsetsBuffer)
-            self.sortParticleIndices.dispatch(x, 1, 1)
-
-        self.computeForces.dispatch(x, 1, 1)
+        # read results back to CPU
+        self.ReadResults()
 
         # print("Dispatch time:", (time.perf_counter() - t) * 1000, "ms")
 
     def ReadResults(self):
-        self.timeBuffer.copy_to(self.timeReadBack)
-        self.time, self.dt = struct.unpack('ff', self.timeReadBack.readback(2 * 4))
-
-        self.ParticlesBuffer.copy_to(self.ParticlesReadBack)
-        self.particles.Set(self.particles.FromBuffer(self.ParticlesReadBack.readback(self.particles.size * self.particles.bufferSize)))
+        self.PositionBuffer.copy_to(self.PositionReadBack)
+        self.particles.SetPositions(np.frombuffer(self.PositionReadBack.readback(self.particles.size * 8), dtype=np.float32).reshape((self.particles.size,2)))
 
     def ReadRenderResults(self):
         self.timeBuffer.copy_to(self.timeReadBack)
         self.time, self.dt = struct.unpack('ff', self.timeReadBack.readback(2 * 4))
 
-        self.PositionBuffer.copy_to(self.PositionReadBack)
+        return self.particles.GetPositions()
 
-        return np.frombuffer(self.PositionReadBack.readback(self.particles.size * 8), dtype=np.float32).reshape((-1,2))
+@nb.njit(fastmath=True)
+def ComputeCellsCountingSort(positions, gridSize, bounds):
+    numberOfParticles = positions.shape[0]
+    gridWidth = int(gridSize[0])
+    gridHeight = int(gridSize[1])
+    numberOfCells = gridWidth * gridHeight
+
+    slopeX = gridWidth / (bounds[1] - bounds[0])
+    slopeY = gridHeight / (bounds[3] - bounds[2])
+    minX = bounds[0]
+    minY = bounds[2]
+    
+    # 1. Compute cell IDs and count particles per cell
+    cellIndices = np.zeros(numberOfParticles, dtype=np.int32)
+    cellCounts = np.zeros(numberOfCells, dtype=np.int32)
+    
+    for i in range(numberOfParticles):
+
+        cellX = int((positions[i, 0] - minX) * slopeX)
+        cellY = int((positions[i, 1] - minY) * slopeY)
+        
+        # Clamp to grid bounds (mimicking shader clamp safety)
+        if cellX < 0: cellX = 0
+        elif cellX >= gridWidth: cellX = gridWidth - 1
+        
+        if cellY < 0: cellY = 0
+        elif cellY >= gridHeight: cellY = gridHeight - 1
+            
+        cellIndex = cellX + gridWidth * cellY
+        cellIndices[i] = cellIndex
+        cellCounts[cellIndex] += 1
+        
+    # 2. Compute offsets via prefix sum
+    cellOffsets = np.zeros(numberOfCells + 1, dtype=np.int32)
+    currentOffset = 0
+    for i in range(numberOfCells):
+        cellOffsets[i] = currentOffset
+        currentOffset += cellCounts[i]
+
+    cellOffsets[numberOfCells] = numberOfParticles
+        
+    # 3. Sort indices into their bins
+    sortedIndices = np.zeros(numberOfParticles, dtype=np.int32)
+    
+    # We use a copy of offsets as write-cursors for each bin
+    insertOffsets = np.copy(cellOffsets)
+    
+    for i in range(numberOfParticles):
+        cellIndex = cellIndices[i]
+        position = insertOffsets[cellIndex]
+        sortedIndices[position] = i
+        insertOffsets[cellIndex] += 1
+
+    return cellOffsets, sortedIndices, cellIndices

@@ -12,7 +12,7 @@ PARTICLE_DTYPE = np.dtype([
     ('position', PARTICLE_PROPERTY_TYPE, (2,)),  # float2 (8 bytes)
     ('velocity', PARTICLE_PROPERTY_TYPE, (2,)),  # float2 (8 bytes)
     ('force',    PARTICLE_PROPERTY_TYPE, (2,)),  # float2 (8 bytes)
-    ('cell',     np.uint32,  (2,)),  # uint2   (8 bytes)
+    # ('cell',     np.uint32,  (2,)),  # uint2   (8 bytes)
     ('id',       np.uint32),        # uint    (4 bytes)
     # --------------------------------------------------
     # Hidden Compiler Padding:       (4 bytes added automatically to align struct size to 8)
@@ -26,60 +26,71 @@ POSITION_DTYPE = np.dtype([
 
 class Particles:
     particles: NDArray
+    positions: SharedBuffer
     size: int
 
     def __init__(self, bounds: Tuple[float, float, float, float], sigma: float):
         self.bounds = bounds
         self.sigma = sigma
 
-        self.bufferSize = PARTICLE_DTYPE.itemsize
-        self.Set(np.empty((0, 10), dtype=PARTICLE_DTYPE))
+        self.positions = SharedBuffer(dtype=POSITION_DTYPE)
 
-        # self.Set(np.empty((0, 10), dtype=PARTICLE_DTYPE))
+        self.bufferSize = PARTICLE_DTYPE.itemsize
+        self.Set(np.zeros(0, dtype=PARTICLE_DTYPE))
 
     def Get(self) -> NDArray:
         return self.particles
-
+    
     def Set(self, particles: NDArray):
-        self.particles = particles
-        self.size = int(particles.shape[0])
+        self.particles = particles.ravel()
+        self.size = int(self.particles.shape[0])
+
         self.ExtractProperties()
 
-    # def Set(self, particles: NDArray):
-    #     self.positions.Resize((particles.shape[0], 2))
-    #     backBuffer = self.positions.GetBackBuffer()
-    #     backBuffer[:] = particles
+        self.positions.Resize((self.size,))
+        self.SetPositions(self.particles['position'])
 
-    #     self.size = int(backBuffer.shape[0])
-    #     # self.ExtractProperties()
+    def GetPositions(self) -> NDArray:
+        return self.positions.GetFrontBuffer()['position']
 
-    #     self.positions.SwapBuffers()
+    def SetPositions(self, positions: NDArray):
+        backBuffer = self.positions.GetBackBuffer()
+        backBuffer['position'] = positions
+
+        self.positions.SwapBuffers()
 
     def FromBuffer(self, buffer: Buffer) -> NDArray:
         return np.frombuffer(buffer, dtype=PARTICLE_DTYPE)
 
     def ExtractProperties(self) -> None:
-        # backBuffer = self.positions.GetBackBuffer()
-        # self.mass = backBuffer['mass']
-        # self.position = backBuffer['position']
-        # self.velocity = backBuffer['velocity']
-        # self.cell = backBuffer['cell']
-        # self.id = backBuffer['id']
         self.mass = self.particles['mass']
         self.id = self.particles['id']
 
-    def GetPositionOnGrid(self, position: Tuple[float, float], size: Tuple[float, float], index: float) -> Tuple[float, float]:
+    def GetPositionsOnGrid(self, numberOfParticles: int, position: Tuple[float, float], size: Tuple[float, float]) -> NDArray:
         x, y = position
         columns, rows = size
         gridResolution = 2**(1/6) * self.sigma
-        return (
-            x + gridResolution * ((index % columns) - .5 * (columns - 1)),
-            y + gridResolution * (index // columns - .5 * (rows - 1))
-        )
+        indices = np.arange(numberOfParticles, dtype=np.int32)
+
+        columnIndices = indices % columns
+        rowIndices = indices // columns
+
+        xOnGrid = x + gridResolution * (columnIndices - 0.5 * (columns - 1))
+        yOnGrid = y + gridResolution * (rowIndices - 0.5 * (rows - 1))
+
+        return np.stack((xOnGrid, yOnGrid), axis=-1).astype(np.float32)
 
     def CreateRectangle(self, mass: float, position: Tuple[float, float], size: Tuple[float, float], velocity: Tuple[float, float], id: int) -> NDArray:
         columns, rows = size
-        return np.array([(mass, self.GetPositionOnGrid(position, size, int(index)), velocity, (.0, .0), (0, 0), id) for index in range(int(columns * rows))], dtype=PARTICLE_DTYPE)
+        numberOfParticles = int(columns * rows)
+
+        particles = np.zeros(numberOfParticles, dtype=PARTICLE_DTYPE)
+        particles['mass'] = mass
+        particles['velocity'] = velocity
+        particles['id'] = id
+        particles['position'] = self.GetPositionsOnGrid(numberOfParticles, position, size)
+
+        return particles
 
     def GetParticlesInBounds(self, particles: NDArray):
         maskX = (particles['position'][:, 0] > self.bounds[0] + 1) & (particles['position'][:, 0] < self.bounds[1] - 1)
