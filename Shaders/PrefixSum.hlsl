@@ -17,8 +17,7 @@ groupshared uint SharedScan[256];
 void main(
     uint3 dispatchThreadID : SV_DispatchThreadID,
     uint3 groupID : SV_GroupID,
-    uint3 groupThreadID : SV_GroupThreadID
-) {
+    uint3 groupThreadID : SV_GroupThreadID) {
     uint localIndex = groupThreadID.x;
     uint globalIndex = dispatchThreadID.x;
     uint numberOfCells = gridSize.x * gridSize.y;
@@ -29,10 +28,10 @@ void main(
 
     // Blelloch upsweep
     [unroll]
-    for (uint stride = 1; stride < 256; stride <<= 1) {
-        uint index = ((localIndex + 1) * stride * 2) - 1;
-        if (index < 256) {
-            SharedScan[index] += SharedScan[index - stride];
+    for (uint strideUp = 1; strideUp < 256; strideUp <<= 1) {
+        uint Index = ((localIndex + 1) * strideUp * 2) - 1;
+        if (Index < 256) {
+            SharedScan[Index] += SharedScan[Index - strideUp];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -44,12 +43,12 @@ void main(
 
     // Blelloch downsweep
     [unroll]
-    for (uint stride = 128; stride > 0; stride >>= 1) {
-        uint index = ((localIndex + 1) * stride * 2) - 1;
-        if (index < 256) {
-            uint temp = SharedScan[index - stride];
-            SharedScan[index - stride] = SharedScan[index];
-            SharedScan[index] += temp;
+    for (uint strideDown = 128; strideDown > 0; strideDown >>= 1) {
+        uint Index = ((localIndex + 1) * strideDown * 2) - 1;
+        if (Index < 256) {
+            uint temp = SharedScan[Index - strideDown];
+            SharedScan[Index - strideDown] = SharedScan[Index];
+            SharedScan[Index] += temp;
         }
         GroupMemoryBarrierWithGroupSync();
     }

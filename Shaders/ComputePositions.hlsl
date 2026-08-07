@@ -7,7 +7,7 @@ struct Particle {
 };
 
 struct TimeData {
-    float totalTime;
+    uint frame;
     float dt;
 };
 
@@ -23,18 +23,22 @@ cbuffer Boundaries : register(b1) {
     float4 bounds; // x=minX, y=maxX, z=minY, w=maxY
 }
 
+#define DesiredEnergy 0.005 * n
+
 RWStructuredBuffer<Particle> Particles : register(u0);
 RWStructuredBuffer<float2> Positions : register(u1);
 
-RWStructuredBuffer<TimeData> SimulationTime : register(u2);
+StructuredBuffer<TimeData> Time : register(t0);
+
+StructuredBuffer<float> Energy : register(t1);
 
 void ComputeX(uint i) {
-    float a = SimulationTime[0].dt * 0.5 / Particles[i].mass;
-    Particles[i].position += SimulationTime[0].dt * (Particles[i].velocity + a * Particles[i].force);
+    float a = Time[0].dt * 0.5 / Particles[i].mass;
+    Particles[i].position += Time[0].dt * (Particles[i].velocity + a * Particles[i].force);
 }
 
 void ComputeV(uint i) {
-    float a = SimulationTime[0].dt * 0.5 / Particles[i].mass;
+    float a = Time[0].dt * 0.5 / Particles[i].mass;
     Particles[i].velocity += a * Particles[i].force;
 }
 
@@ -42,14 +46,14 @@ void ComputeV(uint i) {
 void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     uint Index = dispatchThreadID.x;
 
-    if (Index == 0) {
-        SimulationTime[0].totalTime += SimulationTime[0].dt;
-    }
-
     if (Index >= (uint)n) return;
 
     ComputeX(Index);
     ComputeV(Index);
+
+    if (Time[0].frame * Time[0].dt < 15 && Time[0].frame % 1000 == 999) {
+        Particles[Index].velocity *= sqrt(DesiredEnergy / Energy[0]);
+    }
 
     Positions[Index] = Particles[Index].position;
 }

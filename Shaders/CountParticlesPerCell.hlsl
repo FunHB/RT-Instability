@@ -31,8 +31,7 @@ float map(float input, float inputStart, float inputEnd, float outputStart, floa
 float2 map(float2 input, float2 inputStart, float2 inputEnd, float2 outputStart, float2 outputEnd) {
     return float2(
         map(input.x, inputStart.x, inputEnd.x, outputStart.x, outputEnd.x),
-        map(input.y, inputStart.y, inputEnd.y, outputStart.y, outputEnd.y)
-    );
+        map(input.y, inputStart.y, inputEnd.y, outputStart.y, outputEnd.y));
 }
 
 int2 GetCell(float2 position) {
@@ -46,13 +45,13 @@ uint GetCellIndex(uint2 cell) {
 
 [numthreads(256, 1, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
-    uint index = dispatchThreadID.x;
-    if (index >= (uint)n) return;
+    uint Index = dispatchThreadID.x;
+    if (Index >= (uint)n) return;
 
-    int2 cell = GetCell(Particles[index].position);
+    int2 cell = GetCell(Particles[Index].position);
     uint cellIndex = GetCellIndex(uint2(cell));
     uint previousCount;
 
-    ParticleCellIndices[index] = cellIndex;
+    ParticleCellIndices[Index] = cellIndex;
     InterlockedAdd(CellCounts[cellIndex], 1, previousCount);
 }

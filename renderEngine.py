@@ -73,22 +73,14 @@ class RenderEngine:
         self.renderPositions[:, :2] = positions
         self.scatter.data = self.renderPositions
 
-        if 'cells' in self.computeEngine.__dict__:
-            cellsX = self.computeEngine.cells % self.computeEngine.gridSize[0]
-            cellsY = self.computeEngine.cells // self.computeEngine.gridSize[0]
+        simulationTime = self.computeEngine.frame * self.computeEngine.dt
 
-            self.colors[:, 0] = cellsX / self.computeEngine.gridSize[0]
-            self.colors[:, 1] = cellsY / self.computeEngine.gridSize[1]
-            self.colors[:, 2] = 0.5
-
-            self.scatter.colors = self.colors
-
-        subplot.title = f'Simulation | {time.time() - self.time:.2f} s{f' | {self.computeEngine.time:.2f} s' if self.computeEngine.time > 0 else ''}'
+        subplot.title = f'Simulation | {time.time() - self.time:.2f} s{f' | {simulationTime:.2f} s' if simulationTime > 0 else ''}'
 
         if self.print:
-            if self.computeEngine.time in TIMES:
-                print(f'Frame: {self.computeEngine.frame} | Time: {self.computeEngine.time:.2f} s | Particles: {self.particles.size}')
-                self.figure.export(f'img/{self.computeEngine.time:.1f}.png', extension='.png')
+            if simulationTime in TIMES:
+                print(f'Frame: {self.computeEngine.frame} | Time: {simulationTime:.2f} s | Particles: {self.particles.size}')
+                self.figure.export(f'img/{simulationTime:.1f}.png', extension='.png')
 
     def RenderLoop(self):
         self.figure.show()

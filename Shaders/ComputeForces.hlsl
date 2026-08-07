@@ -7,7 +7,7 @@ struct Particle {
 };
 
 struct TimeData {
-    float totalTime;
+    uint frame;
     float dt;
 };
 
@@ -26,9 +26,11 @@ cbuffer Boundaries : register(b1) {
 
 RWStructuredBuffer<Particle> Particles : register(u0);
 
+RWStructuredBuffer<float> Energy : register(u1);
+
 StructuredBuffer<uint> CellOffsets : register(t0);
 StructuredBuffer<uint> SortedParticleIndices : register(t1);
-StructuredBuffer<TimeData> SimulationTime : register(t2);
+StructuredBuffer<TimeData> Time : register(t2);
 
 float map(float input, float inputStart, float inputEnd, float outputStart, float outputEnd) {
     float slope = 1.0 * (outputEnd - outputStart) / (inputEnd - inputStart);
@@ -42,7 +44,7 @@ float2 map(float2 input, float2 inputStart, float2 inputEnd, float2 outputStart,
 }
 
 void ComputeV(uint i) {
-    double a = SimulationTime[0].dt * .5 / Particles[i].mass;
+    double a = Time[0].dt * .5 / Particles[i].mass;
     Particles[i].velocity += a * Particles[i].force;
 }
 
@@ -96,11 +98,6 @@ void ComputeF(uint i) {
     }
 }
 
-void AddGravity(uint i) {
-    if (Particles[i].id == 1 && SimulationTime[0].totalTime < 15.0) return;
-    Particles[i].force += Particles[i].mass * g.xy;
-}
-
 void ComputeBounds(uint i) {
     float2 dMin = Particles[i].position - bounds.xz;
     float2 dMax = bounds.yw - Particles[i].position;
@@ -122,6 +119,17 @@ void ComputeBounds(uint i) {
     Particles[i].force -= max(fMax, 0.0);
 }
 
+void AddGravity(uint i) {
+    if (Particles[i].id == 1 && Time[0].frame * Time[0].dt < 15.0) return;
+    Particles[i].force += Particles[i].mass * g.xy;
+}
+
+void CalculateEnergy(uint i) {
+    double kineticEnergy = 0.5 * Particles[i].mass * dot(Particles[i].velocity, Particles[i].velocity);
+
+    Energy[0] += kineticEnergy;
+}
+
 [numthreads(256, 1, 1)] 
 void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     uint Index = dispatchThreadID.x;
@@ -132,7 +140,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     ComputeF(Index);
     ComputeBounds(Index);
-    // AddGravity(Index);
+    AddGravity(Index);
+
+    CalculateEnergy(Index);
 
     ComputeV(Index);
 }

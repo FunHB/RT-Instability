@@ -63,7 +63,7 @@ class Particles:
         self.mass = self.particles['mass']
         self.id = self.particles['id']
 
-    def GetPositionsOnGrid(self, numberOfParticles: int, position: Tuple[float, float], size: Tuple[float, float]) -> NDArray:
+    def GetPositionsOnGrid(self, numberOfParticles: int, position: Tuple[float, float], size: Tuple[int, int]) -> NDArray:
         x, y = position
         columns, rows = size
         gridResolution = 2**(1/6) * self.sigma
@@ -77,7 +77,7 @@ class Particles:
 
         return np.stack((xOnGrid, yOnGrid), axis=-1).astype(np.float32)
 
-    def CreateRectangle(self, mass: float, position: Tuple[float, float], size: Tuple[float, float], velocity: Tuple[float, float], id: int) -> NDArray:
+    def CreateRectangle(self, mass: float, position: Tuple[float, float], size: Tuple[int, int], velocity: Tuple[float, float], id: int) -> NDArray:
         columns, rows = size
         numberOfParticles = int(columns * rows)
 
@@ -90,14 +90,16 @@ class Particles:
         return particles
 
     def GetParticlesInBounds(self, particles: NDArray):
-        maskX = (particles['position'][:, 0] > self.bounds[0] + 1) & (particles['position'][:, 0] < self.bounds[1] - 1)
-        maskY = (particles['position'][:, 1] > self.bounds[2] + 1) & (particles['position'][:, 1] < self.bounds[3] - 1)
+        maskX = (particles['position'][:, 0] > self.bounds[0]) & (particles['position'][:, 0] < self.bounds[1])
+        maskY = (particles['position'][:, 1] > self.bounds[2]) & (particles['position'][:, 1] < self.bounds[3])
         return particles[maskX & maskY]
 
-    def AddShape(self, position: Tuple[float, float], size: Tuple[float, float], mass: float = 1, velocity: Tuple[float, float] = (0, 0), id: int = 0, f: Callable[[NDArray], NDArray[np.bool]] = lambda p: p['mass'] > 0) -> None:
+    def AddShape(self, position: Tuple[float, float], size: Tuple[int, int], mass: float = 1, velocity: Tuple[float, float] = (0, 0), id: int = 0, f: Callable[[NDArray], NDArray[np.bool]] = lambda p: p['mass'] > 0) -> None:
         square = self.CreateRectangle(mass, position, size, velocity, id)
         shape = square[f(square)]
         shape = self.GetParticlesInBounds(shape)
+
+        print(f"{id} particle count: {shape.size}")
 
         if self.size > 0:
             shape = np.concatenate((self.Get(), shape))

@@ -13,11 +13,11 @@ RWStructuredBuffer<uint> SortedParticleIndices : register(u1);
 
 [numthreads(256, 1, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
-    uint index = dispatchThreadID.x;
-    if (index >= (uint)n) return;
+    uint Index = dispatchThreadID.x;
+    if (Index >= (uint)n) return;
 
-    uint cellIndex = ParticleCellIndices[index];
+    uint cellIndex = ParticleCellIndices[Index];
     uint writeIndex;
     InterlockedAdd(CellWriteHeads[cellIndex], 1, writeIndex);
-    SortedParticleIndices[writeIndex] = index;
+    SortedParticleIndices[writeIndex] = Index;
 }

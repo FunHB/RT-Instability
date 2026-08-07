@@ -26,9 +26,9 @@ void main(uint3 groupThreadID : SV_GroupThreadID) {
     // Blelloch upsweep
     [unroll]
     for (uint stride = 1; stride < 256; stride <<= 1) {
-        uint index = ((localIndex + 1) * stride * 2) - 1;
-        if (index < 256) {
-            SharedScan[index] += SharedScan[index - stride];
+        uint Index = ((localIndex + 1) * stride * 2) - 1;
+        if (Index < 256) {
+            SharedScan[Index] += SharedScan[Index - stride];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -41,11 +41,11 @@ void main(uint3 groupThreadID : SV_GroupThreadID) {
     // Blelloch downsweep
     [unroll]
     for (uint stride = 128; stride > 0; stride >>= 1) {
-        uint index = ((localIndex + 1) * stride * 2) - 1;
-        if (index < 256) {
-            uint temp = SharedScan[index - stride];
-            SharedScan[index - stride] = SharedScan[index];
-            SharedScan[index] += temp;
+        uint Index = ((localIndex + 1) * stride * 2) - 1;
+        if (Index < 256) {
+            uint temp = SharedScan[Index - stride];
+            SharedScan[Index - stride] = SharedScan[Index];
+            SharedScan[Index] += temp;
         }
         GroupMemoryBarrierWithGroupSync();
     }
