@@ -15,10 +15,21 @@ class SharedBuffer:
         self.readIndex = 1
     
     def GetBackBuffer(self):
-        return self.memory[self.writeIndex]
+        with self.lock:
+            return self.memory[self.writeIndex]
         
     def GetFrontBuffer(self):
-        return self.memory[self.readIndex]
+        with self.lock:
+            return self.memory[self.readIndex]
+
+    def WriteBackAndSwap(self, data, field=None):
+        with self.lock:
+            if field is None:
+                self.memory[self.writeIndex][...] = data
+            else:
+                self.memory[self.writeIndex][field] = data
+
+            self.writeIndex, self.readIndex = self.readIndex, self.writeIndex
 
     def SwapBuffers(self):
         with self.lock:

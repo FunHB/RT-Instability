@@ -56,12 +56,15 @@ uint GetCellIndex(uint2 cell) {
 }
 
 void Force(uint i, uint j) {
-    double2 rij = Particles[j].position - Particles[i].position;
-    double r = length(rij);
+    float2 rij = Particles[j].position - Particles[i].position;
+    float r2 = dot(rij, rij);
+    float rCut2 = rCut * rCut;
 
-    if (r <= rCut) {
-        double s = pow(sigma / r, 6);
-        double f = 24 * epsilon * s / pow(r, 2) * (1 - 2 * s);
+    if (r2 <= rCut2 && r2 > 1e-12) {
+        float invR2 = 1.0 / r2;
+        float s2 = (sigma * sigma) * invR2;
+        float s6 = s2 * s2 * s2;
+        float f = 24.0 * epsilon * s6 * invR2 * (1.0 - 2.0 * s6);
         Particles[i].force += f * rij;
     }
 }
@@ -77,7 +80,7 @@ void ComputeF(uint i) {
 
     for (int x = minX; x <= maxX; x++) {
         for (int y = minY; y <= maxY; y++) {
-            uint neighbourCellIndex = GetCellIndex((uint2)(x, y));
+            uint neighbourCellIndex = GetCellIndex(uint2(x, y));
 
             uint startIndex = CellOffsets[neighbourCellIndex];
             uint endIndex = CellOffsets[neighbourCellIndex + 1];
@@ -94,7 +97,7 @@ void ComputeF(uint i) {
 }
 
 void AddGravity(uint i) {
-    if (Particles[i].id == 1 & SimulationTime[0].totalTime < 15.0) return;
+    if (Particles[i].id == 1 && SimulationTime[0].totalTime < 15.0) return;
     Particles[i].force += Particles[i].mass * g.xy;
 }
 
@@ -124,8 +127,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     uint Index = dispatchThreadID.x;
 
     if (Index >= (uint)n) return;
-
-    float2 force = Particles[Index].force;
 
     Particles[Index].force = 0.xx;
 

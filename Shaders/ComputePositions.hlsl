@@ -29,12 +29,12 @@ RWStructuredBuffer<float2> Positions : register(u1);
 RWStructuredBuffer<TimeData> SimulationTime : register(u2);
 
 void ComputeX(uint i) {
-    double a = SimulationTime[0].dt * .5 / Particles[i].mass;
+    float a = SimulationTime[0].dt * 0.5 / Particles[i].mass;
     Particles[i].position += SimulationTime[0].dt * (Particles[i].velocity + a * Particles[i].force);
 }
 
 void ComputeV(uint i) {
-    double a = SimulationTime[0].dt * .5 / Particles[i].mass;
+    float a = SimulationTime[0].dt * 0.5 / Particles[i].mass;
     Particles[i].velocity += a * Particles[i].force;
 }
 

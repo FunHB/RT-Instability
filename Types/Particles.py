@@ -54,10 +54,7 @@ class Particles:
         return self.positions.GetFrontBuffer()['position']
 
     def SetPositions(self, positions: NDArray):
-        backBuffer = self.positions.GetBackBuffer()
-        backBuffer['position'] = positions
-
-        self.positions.SwapBuffers()
+        self.positions.WriteBackAndSwap(positions, field='position')
 
     def FromBuffer(self, buffer: Buffer) -> NDArray:
         return np.frombuffer(buffer, dtype=PARTICLE_DTYPE)
