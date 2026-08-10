@@ -1,5 +1,7 @@
 import struct
+import threading
 from typing import Tuple
+from queue import SimpleQueue, Empty
 
 import numpy as np
 
@@ -48,6 +50,13 @@ class ComputeEngine:
         self.dt = dt
         self.frame = 0
 
+        self._energyReadbackConfigured = False
+        self._energyReadbackEnabled = False
+        self._energyStopEvent = threading.Event()
+        self._energyStateLock = threading.Lock()
+        self._energySamples = SimpleQueue()
+        self._energyReadbackThread = None
+
         self.particleDispatchX = (self.particles.size + THREAD_NUM - 1) // THREAD_NUM
         self.cellDispatchX = (self.numberOfCells + THREAD_NUM - 1) // THREAD_NUM
 
@@ -60,6 +69,16 @@ class ComputeEngine:
         self.UpdateParticles()
         
         self.InitializeShader()
+
+        # Auto-enable async sampling when a project-specific EnergyBuffer exists.
+        if 'EnergyBuffer' in self.__dict__:
+            self.ConfigureAsyncReadback(
+                sourceBuffer=self.EnergyBuffer,
+                sampleSize=self.EnergyBuffer.size,
+                intervalFrames=120,
+                slots=4,
+                lagSamples=2
+            )
         
     def InitializeConstantBuffers(self):
         # Config
@@ -200,6 +219,7 @@ class ComputeEngine:
 
     def Dispatch(self) -> None:
         self.frame += 1
+        self.time += self.dt
 
         # t = time.perf_counter()
 
@@ -209,6 +229,9 @@ class ComputeEngine:
         # dispatch compute shader
         self.computeForces.dispatch(self.particleDispatchX, 1, 1)
         self.computePositions.dispatch(self.particleDispatchX, 1, 1)
+
+        if self._energyReadbackEnabled:
+            self._ScheduleAsyncReadback()
 
         # print("Dispatch time:", (time.perf_counter() - t) * 1000, "ms")
 
@@ -223,3 +246,116 @@ class ComputeEngine:
         self.time, self.dt = struct.unpack('ff', self.timeReadBack.readback(2 * 4))
 
         return self.particles.GetPositions()
+
+    def ConfigureAsyncReadback(self, sourceBuffer: Buffer, sampleSize: int, intervalFrames: int = 120, slots: int = 4, lagSamples: int = 2):
+        if sampleSize <= 0:
+            raise ValueError('sampleSize must be greater than 0.')
+        if intervalFrames <= 0:
+            raise ValueError('intervalFrames must be greater than 0.')
+        if slots < 2:
+            raise ValueError('slots must be at least 2.')
+        if lagSamples < 1:
+            raise ValueError('lagSamples must be at least 1.')
+
+        self._energySourceBuffer = sourceBuffer
+        self._energySampleSize = sampleSize
+        self._energyIntervalFrames = intervalFrames
+        self._energyLagSamples = lagSamples
+        self._energyReadbackBuffers = [Buffer(sampleSize, HEAP_READBACK) for _ in range(slots)]
+        with self._energyStateLock:
+            self._energySlotFrames = [-1] * slots
+            self._energyWriteSlot = 0
+
+        self._energyReadbackConfigured = True
+        self._energyReadbackEnabled = True
+
+        if self._energyReadbackThread is None or not self._energyReadbackThread.is_alive():
+            self._energyStopEvent.clear()
+            self._energyReadbackThread = threading.Thread(target=self._AsyncReadbackLoop, daemon=True)
+            self._energyReadbackThread.start()
+
+    def DisableAsyncReadback(self):
+        self._energyReadbackEnabled = False
+
+    def Shutdown(self):
+        self._energyStopEvent.set()
+        if self._energyReadbackThread is not None and self._energyReadbackThread.is_alive():
+            self._energyReadbackThread.join(timeout=1.0)
+
+    def _ScheduleAsyncReadback(self):
+        if not self._energyReadbackConfigured:
+            return
+        if self.frame % self._energyIntervalFrames != 0:
+            return
+
+        with self._energyStateLock:
+            slot = self._energyWriteSlot
+
+            # Skip this sample when consumer is slower than producer.
+            if self._energySlotFrames[slot] != -1:
+                return
+
+            self._energySourceBuffer.copy_to(self._energyReadbackBuffers[slot], size=self._energySampleSize)
+            self._energySlotFrames[slot] = self.frame
+            self._energyWriteSlot = (slot + 1) % len(self._energyReadbackBuffers)
+
+    def _AsyncReadbackLoop(self):
+        while not self._energyStopEvent.is_set():
+            slot = self._GetReadyReadbackSlot()
+
+            if slot == -1:
+                self._energyStopEvent.wait(0.001)
+                continue
+
+            with self._energyStateLock:
+                frame = self._energySlotFrames[slot]
+            payload = self._energyReadbackBuffers[slot].readback(self._energySampleSize)
+            with self._energyStateLock:
+                self._energySlotFrames[slot] = -1
+            self._energySamples.put((frame, payload))
+
+    def _GetReadyReadbackSlot(self) -> int:
+        if not self._energyReadbackConfigured:
+            return -1
+
+        threshold = self.frame - self._energyIntervalFrames * self._energyLagSamples
+
+        candidate = -1
+        oldestFrame = None
+
+        with self._energyStateLock:
+            for i, sampleFrame in enumerate(self._energySlotFrames):
+                if sampleFrame == -1 or sampleFrame > threshold:
+                    continue
+
+                if oldestFrame is None or sampleFrame < oldestFrame:
+                    oldestFrame = sampleFrame
+                    candidate = i
+
+        return candidate
+
+    def GetAsyncReadbackSamples(self, maxSamples: int = 0):
+        samples = []
+
+        while True:
+            if maxSamples > 0 and len(samples) >= maxSamples:
+                break
+
+            try:
+                samples.append(self._energySamples.get_nowait())
+            except Empty:
+                break
+
+        return samples
+
+    def GetLatestAsyncReadbackFloat(self):
+        latest = None
+        for sample in self.GetAsyncReadbackSamples():
+            latest = sample
+
+        if latest is None:
+            return None
+
+        frame, payload = latest
+        value = struct.unpack('f', payload[:4])[0]
+        return frame, value

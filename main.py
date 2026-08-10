@@ -49,3 +49,4 @@ if __name__ == "__main__":
 
     shutdownEvent.set()
     computeThread.join()
+    computeEngine.Shutdown()
