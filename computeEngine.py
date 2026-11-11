@@ -72,14 +72,12 @@ class ComputeEngine:
 
         # Auto-enable async sampling when a project-specific EnergyBuffer exists.
         if 'EnergyBuffer' in self.__dict__:
-            self.ConfigureAsyncReadback(sourceBuffer=self.EnergyBuffer, sampleSize=self.EnergyBuffer.size, intervalFrames=120, slots=4, lagSamples=2)
+            self.ConfigureAsyncReadback(sourceBuffer=self.TotalEnergyBuffer, sampleSize=4, intervalFrames=120, slots=4, lagSamples=2)
         
     def InitializeConstantBuffers(self):
         # Config
         self.configBuffer = Buffer(Align256(6 * 4))
         self.configUpload = Buffer(self.configBuffer.size, HEAP_UPLOAD)
-
-        print(self.particles.size, *self.gridSize, *self.gravity)
 
         self.configUpload.upload(struct.pack('I2II2f', self.particles.size, *self.gridSize, 0, *self.gravity))
         self.configUpload.copy_to(self.configBuffer)
@@ -110,6 +108,7 @@ class ComputeEngine:
         self.ParticlesUpload = Buffer(self.ParticlesBuffer.size, HEAP_UPLOAD)
 
         self.EnergyBuffer = Buffer(4 * self.particleDispatchX, format=compushady.formats.R32_FLOAT)
+        self.TotalEnergyBuffer = Buffer(4, format=compushady.formats.R32_FLOAT)
 
         self.CellCountsBuffer = Buffer(4 * self.numberOfCells, format=compushady.formats.R32_UINT)
         self.CellOffsetsBuffer = Buffer(int(4 * (self.gridSize[0] * self.gridSize[1] + 1)), format=compushady.formats.R32_UINT)
@@ -127,7 +126,7 @@ class ComputeEngine:
         
         self.preShader = Compute(
             shader=preShader,
-            uav=[self.timeBuffer, self.EnergyBuffer]
+            uav=[self.timeBuffer]
         )
 
         with open(CLEAR_SHADER_PATH) as file:
@@ -193,7 +192,7 @@ class ComputeEngine:
         self.computePositions = Compute(
             shader=computePositions,
             cbv=[self.configBuffer, self.boundsBuffer],
-            srv=[self.timeBuffer, self.EnergyBuffer],
+            srv=[self.timeBuffer, self.TotalEnergyBuffer],
             uav=[self.ParticlesBuffer]
         )
 
@@ -206,6 +205,15 @@ class ComputeEngine:
             srv=[self.CellOffsetsBuffer, self.SortedParticleIndicesBuffer, self.timeBuffer],
             uav=[self.ParticlesBuffer, self.EnergyBuffer]
         )
+
+        with open(SHADER_DIRECTORY + 'ReduceEnergy.hlsl') as file:
+            reduceEnergyShader = hlsl.compile(file.read())
+
+        self.energyConfigBuffer = Buffer(Align256(4))
+        self.energyConfigUpload = Buffer(self.energyConfigBuffer.size, HEAP_UPLOAD)
+        self.energyConfigUpload.upload(struct.pack('I', self.particleDispatchX))
+        self.energyConfigUpload.copy_to(self.energyConfigBuffer)
+        self.reduceEnergy = Compute(shader=reduceEnergyShader, cbv=[self.energyConfigBuffer], srv=[self.EnergyBuffer], uav=[self.TotalEnergyBuffer])
 
     def UpdateParticles(self) -> None:
         buffer = self.particles.Get().tobytes()
@@ -230,6 +238,7 @@ class ComputeEngine:
 
         # dispatch compute shader
         self.computeForces.dispatch(self.particleDispatchX, 1, 1)
+        self.reduceEnergy.dispatch(1, 1, 1)
         self.computePositions.dispatch(self.particleDispatchX, 1, 1)
 
     # def ReadResults(self):
@@ -300,7 +309,7 @@ class ComputeEngine:
             slot = self._GetReadyReadbackSlot()
 
             if slot == -1:
-                self._energyStopEvent.wait(0.001)
+                self._energyStopEvent.wait(0.01)
                 continue
 
             with self._energyStateLock:

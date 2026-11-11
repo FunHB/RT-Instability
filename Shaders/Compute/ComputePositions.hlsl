@@ -24,7 +24,7 @@ cbuffer Boundaries : register(b1) {
     float4 bounds; // x=minX, y=maxX, z=minY, w=maxY
 }
 
-#define DesiredEnergy 0.005 * n
+#define DesiredEnergy 60 * n 
 
 RWStructuredBuffer<Particle> Particles : register(u0);
 
@@ -42,6 +42,11 @@ void ComputeV(uint i) {
     Particles[i].velocity += a * Particles[i].force;
 }
 
+void ApplyPeriodicBoundary(inout float2 position) {
+    float width = bounds.y - bounds.x;
+    position.x = bounds.x + fmod(position.x - bounds.x + width, width);
+}
+
 [numthreads(256, 1, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     uint Index = dispatchThreadID.x;
@@ -49,9 +54,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     if (Index >= (uint)n) return;
 
     ComputeX(Index);
+    ApplyPeriodicBoundary(Particles[Index].position);
     ComputeV(Index);
 
-    if (Time[0].frame % 1000 == 2) {
-        Particles[Index].velocity *= sqrt(DesiredEnergy / Energy[0]);
+    if (Time[0].frame % 1000 == 0) {
+        float totalEnergy = Energy[0];
+        // Particles[Index].velocity *= sqrt(DesiredEnergy / max(totalEnergy, 1e-20));
     }
 }

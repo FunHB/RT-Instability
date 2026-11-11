@@ -32,36 +32,26 @@ StructuredBuffer<uint> CellOffsets : register(t0);
 StructuredBuffer<uint> SortedParticleIndices : register(t1);
 StructuredBuffer<TimeData> Time : register(t2);
 
-float map(float input, float inputStart, float inputEnd, float outputStart, float outputEnd) {
-    float slope = 1.0 * (outputEnd - outputStart) / (inputEnd - inputStart);
-    return outputStart + slope * (input - inputStart);
-}
-
-float2 map(float2 input, float2 inputStart, float2 inputEnd, float2 outputStart, float2 outputEnd) {
-    return float2(
-        map(input.x, inputStart.x, inputEnd.x, outputStart.x, outputEnd.x), 
-        map(input.y, inputStart.y, inputEnd.y, outputStart.y, outputEnd.y));
-}
-
-void ComputeV(uint i) {
-    float a = Time[0].dt * .5 / Particles[i].mass;
-    Particles[i].velocity += a * Particles[i].force;
-}
+groupshared float EnergyScan[256];
 
 int2 GetCell(float2 position) {
-    float2 normalizedPos = map(position, bounds.xz, bounds.yw, 0.xx, float2(gridSize.xy));
-    return clamp((int2)normalizedPos, int2(0.xx), int2(gridSize.xy - 1));
+    float2 normalizedPos = (position - bounds.xz) * gridSize / (bounds.yw - bounds.xz);
+    return clamp((int2)normalizedPos, int2(0, 0), int2(gridSize.xy - 1));
 }
 
 uint GetCellIndex(uint2 cell) {
     return cell.x + cell.y * gridSize.x;
 }
 
-void Force(uint i, uint j) {
-    float sigma = 0.5 * (Particles[i].sigma + Particles[j].sigma);
-    float epsilon = sqrt(Particles[i].epsilon * Particles[j].epsilon);
+void Force(inout Particle self, Particle other) {
+    float sigma = 0.5 * (self.sigma + other.sigma);
+    float epsilon = sqrt(self.epsilon * other.epsilon);
+    float2 rij = other.position - self.position;
 
-    float2 rij = Particles[j].position - Particles[i].position;
+    float width = bounds.y - bounds.x;
+    if (rij.x >  0.5 * width) rij.x -= width;
+    if (rij.x < -0.5 * width) rij.x += width;
+
     float r2 = dot(rij, rij);
     float rcut = 2.5 * sigma;
 
@@ -71,22 +61,28 @@ void Force(uint i, uint j) {
         float s6 = s2 * s2 * s2;
         float f = 24.0 * epsilon * s6 * invR2 * (1.0 - 2.0 * s6);
 
-        Particles[i].force += f * rij;
+        self.force += f * rij;
     }
 }
 
-void ComputeF(uint i) {
-    int2 cell = GetCell(Particles[i].position);
+int WrapCell(int cell, int count) {
+    cell %= count;
+    if (cell < 0) cell += count;
+    return cell;
+}
+
+void ComputeF(inout Particle self, uint i) {
+    int2 cell = GetCell(self.position);
     int distance = 1;
 
-    int minX = max(0, cell.x - distance);
-    int maxX = min((int)gridSize.x - 1, cell.x + distance);
-    int minY = max(0, cell.y - distance);
-    int maxY = min((int)gridSize.y - 1, cell.y + distance);
+    for (int x = cell.x - distance; x <= cell.x + distance; x++) {
+        for (int y = cell.y - distance; y <= cell.y + distance; y++) {
+            int wrappedX = WrapCell(x, (int)gridSize.x);
 
-    for (int x = minX; x <= maxX; x++) {
-        for (int y = minY; y <= maxY; y++) {
-            uint neighbourCellIndex = GetCellIndex(uint2(x, y));
+            if (y < 0 || y >= (int)gridSize.y)
+            continue;
+
+            uint neighbourCellIndex = GetCellIndex(uint2(wrappedX, y));
 
             uint startIndex = CellOffsets[neighbourCellIndex];
             uint endIndex = CellOffsets[neighbourCellIndex + 1];
@@ -95,63 +91,65 @@ void ComputeF(uint i) {
                 uint particleID = SortedParticleIndices[j];
 
                 if (i != particleID) {
-                    Force(i, particleID);
+                    Force(self, Particles[particleID]);
                 }
             }
         }
     }
 }
 
-void ComputeBounds(uint i) {
-    float2 dMin = Particles[i].position - bounds.xz;
-    float2 dMax = bounds.yw - Particles[i].position;
+void ComputeBounds(inout Particle self) {
+    float bottomDistance = self.position.y - bounds.z;
+    float topDistance = bounds.w - self.position.y;
 
-    float minRestrain = 0.01 * Particles[i].sigma;
+    float minRestrain = 0.01 * self.sigma;
 
-    // --- Bottom / Left Wall Interaction ---
-    float2 rMin = max(dMin, minRestrain);
-    float2 qMin = 0.5 * Particles[i].sigma / rMin;
-    float2 q2Min = qMin * qMin;
-    float2 sMin = q2Min * q2Min * q2Min;
-    float2 fMin = 24.0 * Particles[i].epsilon * 0.5 / rMin * sMin * (2.0 * sMin - 1.0);
+    float rBottom = max(bottomDistance, minRestrain);
+    float sBottom = pow(0.5 * self.sigma / rBottom, 6);
+    float fBottom = 24.0 * self.epsilon * 0.5 / rBottom * sBottom * (2.0 * sBottom - 1.0);
 
-    Particles[i].force += max(fMin, 0.0); 
+    float rTop = max(topDistance, minRestrain);
+    float sTop = pow(0.5 * self.sigma / rTop, 6);
+    float fTop = 24.0 * self.epsilon * 0.5 / rTop * sTop * (2.0 * sTop - 1.0);
 
-    // --- Top / Right Wall Interaction ---
-    float2 rMax = max(dMax, minRestrain);
-    float2 qMax = 0.5 * Particles[i].sigma / rMax;
-    float2 q2Max = qMax * qMax;
-    float2 sMax = q2Max * q2Max * q2Max;
-    float2 fMax = 24.0 * Particles[i].epsilon * 0.5 / rMax * sMax * (2.0 * sMax - 1.0);
-
-    Particles[i].force -= max(fMax, float2(0.0, 0.0));
+    self.force.y += max(fBottom, 0.0);
+    self.force.y -= max(fTop, 0.0);
 }
 
-void AddGravity(uint i) {
+void AddGravity(inout Particle self) {
     // if (Particles[i].id == 1 && Time[0].frame * Time[0].dt < 15.0) return;
-    Particles[i].force += Particles[i].mass * gravity.xy;
+    self.force += self.mass * gravity.xy;
     // Particles[i].force += Particles[i].mass * float2(0.0, -12.0);
 }
 
-void CalculateEnergy(uint i) {
-    float kineticEnergy = 0.5 * Particles[i].mass * dot(Particles[i].velocity, Particles[i].velocity);
-
-    Energy[0] += kineticEnergy;
-}
-
-[numthreads(256, 1, 1)] 
-void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
+[numthreads(256, 1, 1)]
+void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID, uint3 groupID : SV_GroupID) {
     uint Index = dispatchThreadID.x;
+    uint lane = groupThreadID.x;
+    float energy = 0.0;
 
-    if (Index >= (uint)n) return;
+    if (Index < (uint)n) {
+        Particle self = Particles[Index];
+        self.force = float2(0.0, 0.0);
 
-    Particles[Index].force = 0.xx;
+        ComputeF(self, Index);
+        ComputeBounds(self);
+        AddGravity(self);
 
-    ComputeF(Index);
-    ComputeBounds(Index);
-    AddGravity(Index);
+        energy = 0.5 * self.mass * dot(self.velocity, self.velocity);
+        float a = 0.5 * Time[0].dt / self.mass;
+        self.velocity += a * self.force;
 
-    CalculateEnergy(Index);
+        Particles[Index] = self;
+    }
 
-    ComputeV(Index);
+    EnergyScan[lane] = energy;
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lane < stride) EnergyScan[lane] += EnergyScan[lane + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (lane == 0) Energy[groupID.x] = EnergyScan[0];
 }

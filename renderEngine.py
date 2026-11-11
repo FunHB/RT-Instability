@@ -26,7 +26,7 @@ class RenderEngine:
         self.print = print
 
         self.particleSize = 3   # px
-        self.colors = np.array([0xFF000000, 0xFF7F7F7F, 0xFFFFFFFF], dtype=np.uint32)
+        self.colors = np.array([0xFF000000, 0xFFFF7700, 0xFF222282], dtype=np.uint32)
 
         boundsWidth = (self.bounds[1] - self.bounds[0])
         boundsHeight = (self.bounds[3] - self.bounds[2])

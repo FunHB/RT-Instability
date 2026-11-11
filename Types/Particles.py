@@ -26,13 +26,16 @@ POSITION_DTYPE = np.dtype([
     # Hidden Compiler Padding:       (4 bytes added automatically to align struct size to 8)
 ], align=True)
 
+assert PARTICLE_DTYPE.itemsize == 40, f'Unexpected GPU particle stride: {PARTICLE_DTYPE.itemsize}'
+
 class Particles:
     particles: NDArray
     positions: SharedBuffer
     size: int
 
-    def __init__(self, bounds: Tuple[float, float, float, float]):
+    def __init__(self, bounds: Tuple[float, float, float, float], maxSigma: float = 1):
         self.bounds = bounds
+        self.maxSigma = maxSigma
 
         self.positions = SharedBuffer(dtype=POSITION_DTYPE)
 
@@ -64,51 +67,59 @@ class Particles:
         self.mass = self.particles['mass']
         self.id = self.particles['id']
 
-    def GetPositionsOnGrid(self, numberOfParticles: int, position: Tuple[float, float], size: Tuple[int, int], sigma: float) -> NDArray:
-        x, y = position
-        columns, rows = size
-        gridResolution = 2**(1/6) * sigma
-        indices = np.arange(numberOfParticles, dtype=np.int32)
+    def AddParticles(self, positions, mass: float = 1, sigma: float = 1, epsilon: float = 0.1, id: int = 0, velocities: NDArray | None = None):
+        n = len(positions)
+        particles = np.zeros(n, dtype=PARTICLE_DTYPE)
 
-        columnIndices = indices % columns
-        rowIndices = indices // columns
-
-        xOnGrid = x + gridResolution * (columnIndices - 0.5 * (columns - 1))
-        yOnGrid = y + gridResolution * (rowIndices - 0.5 * (rows - 1))
-
-        return np.stack((xOnGrid, yOnGrid), axis=-1).astype(np.float32)
-
-    def CreateRectangle(self, mass: float, position: Tuple[float, float], size: Tuple[int, int], velocity: Tuple[float, float], id: int, sigma: float, epsilon: float) -> NDArray:
-        columns, rows = size
-        numberOfParticles = int(columns * rows)
-
-        particles = np.zeros(numberOfParticles, dtype=PARTICLE_DTYPE)
+        particles['position'] = positions
         particles['mass'] = mass
-        particles['velocity'] = velocity
-        particles['id'] = id
         particles['sigma'] = sigma
         particles['epsilon'] = epsilon
-        particles['position'] = self.GetPositionsOnGrid(numberOfParticles, position, size, sigma)
+        particles['id'] = id
 
-        return particles
+        if velocities is None:
+            particles['velocity'] = 0.0
+        else:
+            particles['velocity'] = velocities
 
-    def GetParticlesInBounds(self, particles: NDArray):
-        maskX = (particles['position'][:, 0] > self.bounds[0]) & (particles['position'][:, 0] < self.bounds[1])
-        maskY = (particles['position'][:, 1] > self.bounds[2]) & (particles['position'][:, 1] < self.bounds[3])
-        return particles[maskX & maskY]
+        particles['force'] = 0.0
 
-    def AddShape(self, position: Tuple[float, float], size: Tuple[int, int], mass: float = 1, velocity: Tuple[float, float] = (0, 0), id: int = 0, sigma: float = 1, epsilon: float = 0.1, f: Callable[[NDArray], NDArray[np.bool]] = lambda p: p['mass'] > 0) -> None:
-        square = self.CreateRectangle(mass, position, size, velocity, id, sigma, epsilon)
-        shape = square[f(square)]
-        shape = self.GetParticlesInBounds(shape)
+        if self.size:
+            particles = np.concatenate((self.Get(), particles))
 
-        print(f"{id} particle count: {shape.size}")
+        self.Set(particles)
 
-        if self.size > 0:
-            shape = np.concatenate((self.Get(), shape))
+    def GetVelocities(self, numberOfParticles: int, mass: float):
+        velocities = np.random.normal(0.0, np.sqrt(60.0 / mass), size=(numberOfParticles, 2))
+        return velocities
 
-        self.Set(shape)
+    def InitializeVelocities(self):
+        masses = self.particles['mass'].astype(np.float32)
+        n = self.size
+
+        self.particles['velocity'] = np.random.normal(0.0, np.sqrt(60.0 / masses)[:, None], size=(n, 2)).astype(np.float32)
+
+        energy = 0.5 * np.sum(masses[:, None] * self.particles['velocity']**2)
+        self.particles['velocity'] *= np.sqrt((60.0 * n) / energy)
 
     @staticmethod
-    def Circle(radius: float, center: Tuple[float, float]) -> Callable[[NDArray], NDArray[np.bool_]]:
-        return lambda p: (p['position'][:, 0] - center[0])**2 + (p['position'][:, 1] - center[1])**2 <= radius**2
+    def GridRegion(xmin: float, xmax: float, ymin: float, ymax: float, spacing: float, count=None):
+        x = np.arange(xmin, xmax + 1e-6, spacing)
+        y = np.arange(ymin, ymax + 1e-6, spacing)
+
+        xx, yy = np.meshgrid(x, y)
+        positions = np.column_stack((xx.ravel(), yy.ravel()))
+
+        if count is not None:
+            positions = positions[:count]
+
+        return positions.astype(np.float32)
+
+    @staticmethod
+    def CircleRegion(center, radius, spacing):
+        positions = Particles.GridRegion(center[0] - radius, center[0] + radius, center[1] - radius, center[1] + radius, spacing)
+
+        dx = positions[:, 0] - center[0]
+        dy = positions[:, 1] - center[1]
+
+        return positions[dx**2 + dy**2 <= radius**2]
