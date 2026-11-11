@@ -14,6 +14,8 @@ PARTICLE_DTYPE = np.dtype([
     ('force',    PARTICLE_PROPERTY_TYPE, (2,)),  # float2 (8 bytes)
     # ('cell',     np.uint32,  (2,)),  # uint2   (8 bytes)
     ('id',       np.uint32),        # uint    (4 bytes)
+    ('sigma',    PARTICLE_PROPERTY_TYPE),      # float  (4 bytes)
+    ('epsilon',  PARTICLE_PROPERTY_TYPE),      # float  (4 bytes)
     # --------------------------------------------------
     # Hidden Compiler Padding:       (4 bytes added automatically to align struct size to 8)
 ], align=True)
@@ -29,9 +31,8 @@ class Particles:
     positions: SharedBuffer
     size: int
 
-    def __init__(self, bounds: Tuple[float, float, float, float], sigma: float):
+    def __init__(self, bounds: Tuple[float, float, float, float]):
         self.bounds = bounds
-        self.sigma = sigma
 
         self.positions = SharedBuffer(dtype=POSITION_DTYPE)
 
@@ -63,10 +64,10 @@ class Particles:
         self.mass = self.particles['mass']
         self.id = self.particles['id']
 
-    def GetPositionsOnGrid(self, numberOfParticles: int, position: Tuple[float, float], size: Tuple[float, float]) -> NDArray:
+    def GetPositionsOnGrid(self, numberOfParticles: int, position: Tuple[float, float], size: Tuple[int, int], sigma: float) -> NDArray:
         x, y = position
         columns, rows = size
-        gridResolution = 2**(1/6) * self.sigma
+        gridResolution = 2**(1/6) * sigma
         indices = np.arange(numberOfParticles, dtype=np.int32)
 
         columnIndices = indices % columns
@@ -77,7 +78,7 @@ class Particles:
 
         return np.stack((xOnGrid, yOnGrid), axis=-1).astype(np.float32)
 
-    def CreateRectangle(self, mass: float, position: Tuple[float, float], size: Tuple[float, float], velocity: Tuple[float, float], id: int) -> NDArray:
+    def CreateRectangle(self, mass: float, position: Tuple[float, float], size: Tuple[int, int], velocity: Tuple[float, float], id: int, sigma: float, epsilon: float) -> NDArray:
         columns, rows = size
         numberOfParticles = int(columns * rows)
 
@@ -85,19 +86,23 @@ class Particles:
         particles['mass'] = mass
         particles['velocity'] = velocity
         particles['id'] = id
-        particles['position'] = self.GetPositionsOnGrid(numberOfParticles, position, size)
+        particles['sigma'] = sigma
+        particles['epsilon'] = epsilon
+        particles['position'] = self.GetPositionsOnGrid(numberOfParticles, position, size, sigma)
 
         return particles
 
     def GetParticlesInBounds(self, particles: NDArray):
-        maskX = (particles['position'][:, 0] > self.bounds[0] + 1) & (particles['position'][:, 0] < self.bounds[1] - 1)
-        maskY = (particles['position'][:, 1] > self.bounds[2] + 1) & (particles['position'][:, 1] < self.bounds[3] - 1)
+        maskX = (particles['position'][:, 0] > self.bounds[0]) & (particles['position'][:, 0] < self.bounds[1])
+        maskY = (particles['position'][:, 1] > self.bounds[2]) & (particles['position'][:, 1] < self.bounds[3])
         return particles[maskX & maskY]
 
-    def AddShape(self, position: Tuple[float, float], size: Tuple[float, float], mass: float = 1, velocity: Tuple[float, float] = (0, 0), id: int = 0, f: Callable[[NDArray], NDArray[np.bool]] = lambda p: p['mass'] > 0) -> None:
-        square = self.CreateRectangle(mass, position, size, velocity, id)
+    def AddShape(self, position: Tuple[float, float], size: Tuple[int, int], mass: float = 1, velocity: Tuple[float, float] = (0, 0), id: int = 0, sigma: float = 1, epsilon: float = 0.1, f: Callable[[NDArray], NDArray[np.bool]] = lambda p: p['mass'] > 0) -> None:
+        square = self.CreateRectangle(mass, position, size, velocity, id, sigma, epsilon)
         shape = square[f(square)]
         shape = self.GetParticlesInBounds(shape)
+
+        print(f"{id} particle count: {shape.size}")
 
         if self.size > 0:
             shape = np.concatenate((self.Get(), shape))

@@ -14,7 +14,7 @@ from compushady.shaders import hlsl
 
 THREAD_NUM = 256
 
-SHADER_DIRECTORY = 'Shaders/'
+SHADER_DIRECTORY = 'Shaders/Compute/'
 
 COMPUTE_FORCES_SHADER_PATH = SHADER_DIRECTORY + 'ComputeForces.hlsl'
 COMPUTE_POSITIONS_SHADER_PATH = SHADER_DIRECTORY + 'ComputePositions.hlsl'
@@ -23,30 +23,30 @@ PREFIX_SUM_BLOCKS_SHADER_PATH = SHADER_DIRECTORY + 'PrefixSum.hlsl'
 PREFIX_SUM_BLOCK_SUMS_SHADER_PATH = SHADER_DIRECTORY + 'PrefixSumBlockSums.hlsl'
 PREFIX_SUM_FINALIZE_SHADER_PATH = SHADER_DIRECTORY + 'PrefixSumFinalize.hlsl'
 SORT_PARTICLE_INDICES_SHADER_PATH = SHADER_DIRECTORY + 'SortParticleIndices.hlsl'
-TIME_SHADER_PATH = SHADER_DIRECTORY + 'Time.hlsl'
 CLEAR_SHADER_PATH = SHADER_DIRECTORY + 'ClearShader.hlsl'
+PRESHADER_PATH = SHADER_DIRECTORY + 'PreShader.hlsl'
 
 def Align256(size):
     return (size + 255) & ~255
 
 class ComputeEngine:
-    def __init__(self, particles: Particles, dt: float, epsilon: float, g: Tuple[float, float]):
+    def __init__(self, particles: Particles, dt: float, gravity: Tuple[float, float]):
         self.particles = particles
 
-        self.rCut = 2.5 * self.particles.sigma
-        self.epsilon = epsilon
-        self.g = np.array(g, dtype=np.float32)
+        maxSigma = np.max(self.particles.particles['sigma'])
+        rCut = 2.5 * maxSigma
+        self.gravity = np.array(gravity, dtype=np.float32)
 
         padding = 1.1
         self.gridSize = np.ceil(
             np.array([
                 (self.particles.bounds[1] - self.particles.bounds[0]), 
                 (self.particles.bounds[3] - self.particles.bounds[2])
-            ]) / (self.rCut * padding)
+            ]) / (rCut * padding)
         ).astype(np.uint32)
+
         self.numberOfCells = int(self.gridSize[0] * self.gridSize[1])
 
-        self.time = .0
         self.dt = dt
         self.frame = 0
 
@@ -72,20 +72,16 @@ class ComputeEngine:
 
         # Auto-enable async sampling when a project-specific EnergyBuffer exists.
         if 'EnergyBuffer' in self.__dict__:
-            self.ConfigureAsyncReadback(
-                sourceBuffer=self.EnergyBuffer,
-                sampleSize=self.EnergyBuffer.size,
-                intervalFrames=120,
-                slots=4,
-                lagSamples=2
-            )
+            self.ConfigureAsyncReadback(sourceBuffer=self.EnergyBuffer, sampleSize=self.EnergyBuffer.size, intervalFrames=120, slots=4, lagSamples=2)
         
     def InitializeConstantBuffers(self):
         # Config
-        self.configBuffer = Buffer(Align256(7 * 4))
+        self.configBuffer = Buffer(Align256(6 * 4))
         self.configUpload = Buffer(self.configBuffer.size, HEAP_UPLOAD)
 
-        self.configUpload.upload(struct.pack('Ifff2I2f', self.particles.size, self.particles.sigma, self.epsilon, self.rCut, *self.gridSize, *self.g))
+        print(self.particles.size, *self.gridSize, *self.gravity)
+
+        self.configUpload.upload(struct.pack('I2II2f', self.particles.size, *self.gridSize, 0, *self.gravity))
         self.configUpload.copy_to(self.configBuffer)
 
         # Bounds
@@ -98,9 +94,8 @@ class ComputeEngine:
         # Time
         self.timeBuffer = Buffer(2 * 4, stride=4)
         self.timeUpload = Buffer(self.timeBuffer.size, HEAP_UPLOAD)
-        self.timeReadBack = Buffer(self.timeBuffer.size, HEAP_READBACK)
 
-        self.timeUpload.upload(struct.pack('ff', self.time, self.dt))
+        self.timeUpload.upload(struct.pack('If', self.frame, self.dt))
         self.timeUpload.copy_to(self.timeBuffer)
 
         # Clear shader config
@@ -114,11 +109,10 @@ class ComputeEngine:
         self.ParticlesBuffer = Buffer(self.particles.bufferSize * self.particles.size, stride=self.particles.bufferSize)
         self.ParticlesUpload = Buffer(self.ParticlesBuffer.size, HEAP_UPLOAD)
 
-        self.PositionBuffer = Buffer(8 * self.particles.size, format=compushady.formats.R32G32_FLOAT)
-        self.PositionReadBack = Buffer(self.PositionBuffer.size, HEAP_READBACK)
+        self.EnergyBuffer = Buffer(4 * self.particleDispatchX, format=compushady.formats.R32_FLOAT)
 
         self.CellCountsBuffer = Buffer(4 * self.numberOfCells, format=compushady.formats.R32_UINT)
-        self.CellOffsetsBuffer = Buffer(4 * (self.gridSize[0] * self.gridSize[1] + 1), format=compushady.formats.R32_UINT)
+        self.CellOffsetsBuffer = Buffer(int(4 * (self.gridSize[0] * self.gridSize[1] + 1)), format=compushady.formats.R32_UINT)
         self.CellWriteHeadsBuffer = Buffer(4 * self.numberOfCells, format=compushady.formats.R32_UINT)
         self.BlockSumsBuffer = Buffer(4 * self.cellDispatchX, format=compushady.formats.R32_UINT)
         self.BlockOffsetsBuffer = Buffer(4 * self.cellDispatchX, format=compushady.formats.R32_UINT)
@@ -127,6 +121,14 @@ class ComputeEngine:
         self.SortedParticleIndicesBuffer = Buffer(4 * self.particles.size, format=compushady.formats.R32_UINT)
     
     def InitializeShader(self):
+
+        with open(PRESHADER_PATH) as file:
+            preShader = hlsl.compile(file.read())
+        
+        self.preShader = Compute(
+            shader=preShader,
+            uav=[self.timeBuffer, self.EnergyBuffer]
+        )
 
         with open(CLEAR_SHADER_PATH) as file:
             clearShader = hlsl.compile(file.read())
@@ -191,7 +193,8 @@ class ComputeEngine:
         self.computePositions = Compute(
             shader=computePositions,
             cbv=[self.configBuffer, self.boundsBuffer],
-            uav=[self.ParticlesBuffer, self.PositionBuffer, self.timeBuffer]
+            srv=[self.timeBuffer, self.EnergyBuffer],
+            uav=[self.ParticlesBuffer]
         )
 
         with open(COMPUTE_FORCES_SHADER_PATH) as file:
@@ -201,7 +204,7 @@ class ComputeEngine:
             shader=computeForces,
             cbv=[self.configBuffer, self.boundsBuffer],
             srv=[self.CellOffsetsBuffer, self.SortedParticleIndicesBuffer, self.timeBuffer],
-            uav=[self.ParticlesBuffer]
+            uav=[self.ParticlesBuffer, self.EnergyBuffer]
         )
 
     def UpdateParticles(self) -> None:
@@ -219,9 +222,8 @@ class ComputeEngine:
 
     def Dispatch(self) -> None:
         self.frame += 1
-        self.time += self.dt
 
-        # t = time.perf_counter()
+        self.preShader.dispatch(1, 1, 1)
 
         # compute cells and upload cell offsets
         self.CalculateCells()
@@ -230,22 +232,15 @@ class ComputeEngine:
         self.computeForces.dispatch(self.particleDispatchX, 1, 1)
         self.computePositions.dispatch(self.particleDispatchX, 1, 1)
 
-        if self._energyReadbackEnabled:
-            self._ScheduleAsyncReadback()
+    # def ReadResults(self):
+    #     self.PositionBuffer.copy_to(self.PositionReadBack)
+    #     self.particles.SetPositions(np.frombuffer(self.PositionReadBack.readback(self.particles.size * 8), dtype=np.float32).reshape((self.particles.size,2)))
 
-        # print("Dispatch time:", (time.perf_counter() - t) * 1000, "ms")
+    # def ReadRenderResults(self):
+    #     self.PositionBuffer.copy_to(self.PositionReadBack)
+    #     self.particles.SetPositions(np.frombuffer(self.PositionReadBack.readback(self.particles.size * 8), dtype=np.float32).reshape((self.particles.size,2)))
 
-    def ReadResults(self):
-        self.PositionBuffer.copy_to(self.PositionReadBack)
-        self.particles.SetPositions(np.frombuffer(self.PositionReadBack.readback(self.particles.size * 8), dtype=np.float32).reshape((self.particles.size,2)))
-
-    def ReadRenderResults(self):
-        self.ReadResults()
-
-        self.timeBuffer.copy_to(self.timeReadBack)
-        self.time, self.dt = struct.unpack('ff', self.timeReadBack.readback(2 * 4))
-
-        return self.particles.GetPositions()
+    #     return self.particles.GetPositions()
 
     def ConfigureAsyncReadback(self, sourceBuffer: Buffer, sampleSize: int, intervalFrames: int = 120, slots: int = 4, lagSamples: int = 2):
         if sampleSize <= 0:
@@ -262,6 +257,7 @@ class ComputeEngine:
         self._energyIntervalFrames = intervalFrames
         self._energyLagSamples = lagSamples
         self._energyReadbackBuffers = [Buffer(sampleSize, HEAP_READBACK) for _ in range(slots)]
+
         with self._energyStateLock:
             self._energySlotFrames = [-1] * slots
             self._energyWriteSlot = 0
